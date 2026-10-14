@@ -27,6 +27,8 @@ class RegistryCacheData:
 	]
 	var version: int = _REGISTRY_CACHE_VERSION
 	var disabled_columns: Array[StringName] = BUILTIN_RESOURCE_PROPERTIES.duplicate() # = hidden columns
+	## Explicitly shown built-in Resource columns, keyed by subresource path.
+	var shown_subresource_builtin_columns: Array[StringName] = []
 	var frozen_columns: Array[StringName] = [&"string_id", &"uid"]
 	var parent_props_first: bool = false
 	var uid_column_width: float = 200.0
@@ -44,6 +46,11 @@ class RegistryCacheData:
 		var cfg := ConfigFile.new()
 		cfg.set_value(_SECTION_GENERAL, "version", version)
 		cfg.set_value(_SECTION_TABLE, "disabled_columns", disabled_columns)
+		cfg.set_value(
+			_SECTION_TABLE,
+			"shown_subresource_builtin_columns",
+			shown_subresource_builtin_columns,
+		)
 		cfg.set_value(_SECTION_TABLE, "frozen_columns", frozen_columns)
 		cfg.set_value(_SECTION_TABLE, "parent_props_first", parent_props_first)
 		cfg.set_value(_SECTION_TABLE, "uid_column_width", uid_column_width)
@@ -68,6 +75,11 @@ class RegistryCacheData:
 			_SECTION_TABLE,
 			"disabled_columns",
 			data.disabled_columns,
+		)
+		data.shown_subresource_builtin_columns = cfg.get_value(
+			_SECTION_TABLE,
+			"shown_subresource_builtin_columns",
+			data.shown_subresource_builtin_columns,
 		)
 		data.frozen_columns = cfg.get_value(_SECTION_TABLE, "frozen_columns", data.frozen_columns)
 		data.parent_props_first = cfg.get_value(

@@ -301,7 +301,14 @@ func is_column_frozen(column_id: StringName) -> bool:
 
 
 func is_column_disabled(column_id: StringName) -> bool:
-	return _resolve_column_storage_key(column_id) in current_cache_data.disabled_columns
+	var key := _resolve_column_storage_key(column_id)
+	if key in current_cache_data.disabled_columns:
+		return true
+	return (
+		is_in_subresource_view()
+		and column_id in RegistryCacheData.BUILTIN_RESOURCE_PROPERTIES
+		and key not in current_cache_data.shown_subresource_builtin_columns
+	)
 
 
 func set_column_frozen(column_id: StringName, frozen: bool) -> void:
@@ -309,6 +316,12 @@ func set_column_frozen(column_id: StringName, frozen: bool) -> void:
 
 
 func set_column_disabled(column_id: StringName, disabled: bool) -> void:
+	if is_in_subresource_view() and column_id in RegistryCacheData.BUILTIN_RESOURCE_PROPERTIES:
+		var key := _resolve_column_storage_key(column_id)
+		if disabled:
+			current_cache_data.shown_subresource_builtin_columns.erase(key)
+		elif key not in current_cache_data.shown_subresource_builtin_columns:
+			current_cache_data.shown_subresource_builtin_columns.append(key)
 	_set_column_flag(current_cache_data.disabled_columns, column_id, disabled)
 
 
