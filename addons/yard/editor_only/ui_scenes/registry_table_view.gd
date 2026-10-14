@@ -1138,20 +1138,16 @@ func _on_cell_selected(row_id: StringName, col: StringName) -> void:
 	if row_id == &"" or col == &"":
 		return
 
+	_subresource_to_inspect = null
+	_uid_resource_to_inspect = ""
 	var cell_value: Variant = data_table.get_cell_value(row_id, col)
 	if cell_value is Resource:
 		_subresource_to_inspect = cell_value
-		_uid_resource_to_inspect = ""
 		return
 
-	_subresource_to_inspect = null
 	if is_in_subresource_view():
 		var row_data: Dictionary = _subresource_rows.get(row_id, { })
-		var res: Resource = row_data.get(&"resource")
-		if res and not res.resource_path.is_empty():
-			_uid_resource_to_inspect = Compat.path_to_uid(res.resource_path)
-		elif res:
-			_subresource_to_inspect = res
+		_subresource_to_inspect = row_data.get(&"resource")
 	else:
 		var uid: StringName = current_registry.get_uid(row_id)
 		if RegistryIO.is_uid_valid(uid):
