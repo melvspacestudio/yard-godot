@@ -78,6 +78,7 @@ var _root_properties_column_info: Array[Dictionary]
 var _uid_resource_to_inspect: String
 var _subresource_to_inspect: Resource
 var _context_column: StringName
+var _pending_subresource_deletion: Dictionary = { }
 
 @onready var data_table: DataTable = %DataTable
 @onready var edit_context_menu: PopupMenu = %EditContextMenu
@@ -105,6 +106,7 @@ func _ready() -> void:
 	data_table.multiple_rows_selected.connect(_on_multiple_rows_selected)
 	footer.add_entry_requested.connect(_on_footer_add_entry_requested)
 	footer.add_subresource_requested.connect(_on_footer_add_subresource_requested)
+	delete_entries_confirmation_dialog.canceled.connect(_on_delete_entries_confirmation_dialog_canceled)
 
 	for action: EditMenuAction in ACTION_SHORTCUTS:
 		if edit_context_menu.get_item_index(action) != -1:
@@ -364,7 +366,7 @@ func toggle_edit_menu_items(edit_menu: PopupMenu) -> void:
 	var is_read_only := column != null and column.read_only
 	edit_menu.set_item_disabled(
 		edit_menu.get_item_index(EditMenuAction.DELETE_ENTRIES),
-		!has_selected_row or in_subresource,
+		!has_selected_row or (in_subresource and _get_selected_subresource_parent().is_empty()),
 	)
 	edit_menu.set_item_disabled(
 		edit_menu.get_item_index(EditMenuAction.DUPLICATE_ENTRIES),
@@ -740,6 +742,7 @@ func _resolve_subresource_leaves(depth: int = -1) -> Dictionary[StringName, Dict
 							&"row_id": StringName("%s:%d" % [item[&"row_id"], i]),
 							&"resource": element,
 							&"display_id": "%s[%d]" % [item[&"display_id"], i],
+							&"array_index": i,
 							&"file_resource": parent_file_res if element.is_built_in() else element,
 						}
 					)
@@ -761,8 +764,8 @@ func _resolve_subresource_leaves(depth: int = -1) -> Dictionary[StringName, Dict
 	return result
 
 
-## Resolve the opened parent before its final property, including an empty array/null field.
-func _get_subresource_target() -> Dictionary:
+## Resolve the opened parent and its editable Resource or Array[Resource] property.
+func _get_subresource_parent() -> Dictionary:
 	var frame: SubresourceFrame = _subresource_stack.back()
 	var property := frame.property
 	var parents := _resolve_subresource_leaves(_subresource_stack.size() - 1)
@@ -785,12 +788,37 @@ func _get_subresource_target() -> Dictionary:
 			if value is not Array or value.is_read_only():
 				return { }
 			parent[&"base_type"] = column.hint_string.get_slice(":", 1)
-		elif value == null:
+		elif value == null or value is Resource:
 			parent[&"base_type"] = column.hint_string
 		else:
 			return { }
 		return parent
 	return { }
+
+
+## Adding is allowed for an array or an unoccupied scalar Resource field.
+func _get_subresource_target() -> Dictionary:
+	var parent := _get_subresource_parent()
+	var res: Resource = parent.get(&"resource")
+	if res and res.get(_subresource_stack.back().property) is Resource:
+		return { }
+	return parent
+
+
+## Reject stale row keys before editing the parent, including shifted array indices.
+func _get_selected_subresource_parent() -> Dictionary:
+	if not current_registry or not is_in_subresource_view() or data_table.selected_rows.is_empty():
+		return { }
+	var parent := _get_subresource_parent()
+	if parent.is_empty():
+		return { }
+	var live_rows := _resolve_subresource_leaves()
+	for row_id: StringName in data_table.selected_rows:
+		var displayed: Dictionary = _subresource_rows.get(row_id, { })
+		var live: Dictionary = live_rows.get(row_id, { })
+		if live.is_empty() or live.get(&"resource") != displayed.get(&"resource"):
+			return { }
+	return parent
 
 
 func _add_subresource_from_picker(
@@ -993,6 +1021,31 @@ func _commit_property_edit(
 
 
 func _ask_confirm_delete_entries() -> void:
+	_pending_subresource_deletion = { }
+	if is_in_subresource_view():
+		var parent := _get_selected_subresource_parent()
+		if parent.is_empty():
+			return
+		var parent_res: Resource = parent[&"resource"]
+		var property: StringName = _subresource_stack.back().property
+		var old_value: Variant = parent_res.get(property)
+		var new_value: Variant = null
+		if old_value is Array:
+			old_value = old_value.duplicate()
+			var remaining: Array = old_value.duplicate()
+			var indices: Array[int] = []
+			for row_id: StringName in data_table.selected_rows:
+				indices.append(_subresource_rows[row_id][&"array_index"])
+			indices.sort()
+			indices.reverse()
+			for index: int in indices:
+				remaining.remove_at(index)
+			new_value = remaining
+		parent[&"property"] = property
+		parent[&"old_value"] = old_value
+		parent[&"new_value"] = new_value
+		_pending_subresource_deletion = parent
+
 	var dialogtext := "Are you sure you want to delete %s?"
 	if data_table.selected_rows.size() > 1:
 		delete_entries_confirmation_dialog.dialog_text = dialogtext % [
@@ -1072,6 +1125,11 @@ func _update_subresource_menu_item(menu: PopupMenu, col: StringName) -> void:
 
 
 func _delete_selected_entries() -> void:
+	if not _pending_subresource_deletion.is_empty():
+		_delete_selected_subresources()
+		return
+	if is_in_subresource_view():
+		return
 	for string_id: StringName in data_table.selected_rows:
 		var uid := current_registry.get_uid(string_id)
 		if RegistryIO.erase_entry(current_registry, uid) != OK:
@@ -1082,6 +1140,29 @@ func _delete_selected_entries() -> void:
 	data_table.set_selected_cell(&"", &"")
 	update_view()
 	registry_changed.emit()
+
+
+func _delete_selected_subresources() -> void:
+	var deletion := _pending_subresource_deletion
+	_pending_subresource_deletion = { }
+	if not current_registry or not is_in_subresource_view():
+		return
+	var parent := _get_subresource_parent()
+	if parent.is_empty() or parent[&"resource"] != deletion[&"resource"]:
+		return
+	var parent_res: Resource = parent[&"resource"]
+	var property: StringName = _subresource_stack.back().property
+	if property != deletion[&"property"] or parent_res.get(property) != deletion[&"old_value"]:
+		update_view()
+		return
+
+	data_table.set_selected_cell(&"", &"")
+	_subresource_to_inspect = null
+	_uid_resource_to_inspect = ""
+	_commit_property_edit(
+		parent_res, parent[&"display_id"], parent[&"file_resource"],
+		property, deletion[&"old_value"], deletion[&"new_value"], true,
+	)
 
 
 func _duplicate_selected_entries() -> void:
@@ -1235,6 +1316,10 @@ func _on_column_context_menu_id_pressed(id: int) -> void:
 
 func _on_delete_entries_confirmation_dialog_confirmed() -> void:
 	_delete_selected_entries()
+
+
+func _on_delete_entries_confirmation_dialog_canceled() -> void:
+	_pending_subresource_deletion = { }
 
 
 func _on_edit_context_menu_about_to_popup() -> void:
