@@ -104,6 +104,7 @@ func _ready() -> void:
 	data_table.column_resized.connect(_on_column_resized)
 	data_table.multiple_rows_selected.connect(_on_multiple_rows_selected)
 	footer.add_entry_requested.connect(_on_footer_add_entry_requested)
+	footer.add_subresource_requested.connect(_on_footer_add_subresource_requested)
 
 	for action: EditMenuAction in ACTION_SHORTCUTS:
 		if edit_context_menu.get_item_index(action) != -1:
@@ -591,7 +592,7 @@ func _reset_table_navigation() -> void:
 
 func _update_root_view() -> void:
 	subresource_bar.visible = false
-	footer.toggle_add_entry_fields(true)
+	footer.set_root_add_entry()
 
 	var saved_sort_col := data_table.sort_column
 	var saved_sort_asc := data_table.sort_ascending
@@ -648,7 +649,8 @@ func _update_root_view() -> void:
 
 func _update_subresource_view() -> void:
 	subresource_bar.visible = true
-	footer.toggle_add_entry_fields(false)
+	var frame: SubresourceFrame = _subresource_stack.back()
+	footer.set_subresource_target(_get_subresource_target(), _cache_key(&""))
 
 	var saved_sort_col := data_table.sort_column
 	var saved_sort_asc := data_table.sort_ascending
@@ -660,7 +662,6 @@ func _update_subresource_view() -> void:
 	_subresource_rows = _resolve_subresource_leaves()
 	_update_subresource_breadcrumb()
 
-	var frame: SubresourceFrame = _subresource_stack.back()
 	var leaf_resources: Array[Resource] = []
 	for row_id: StringName in _subresource_rows:
 		leaf_resources.append(_subresource_rows[row_id][&"resource"])
@@ -758,6 +759,78 @@ func _resolve_subresource_leaves(depth: int = -1) -> Dictionary[StringName, Dict
 	for item: Dictionary in current:
 		result[item[&"row_id"]] = item
 	return result
+
+
+## Resolve the opened parent before its final property, including an empty array/null field.
+func _get_subresource_target() -> Dictionary:
+	var frame: SubresourceFrame = _subresource_stack.back()
+	var property := frame.property
+	var parents := _resolve_subresource_leaves(_subresource_stack.size() - 1)
+	var parent: Dictionary = parents.get(frame.parent_row_id, { })
+	var res: Resource = parent.get(&"resource")
+	if not res or res != frame.parent_resource:
+		return { }
+	for prop: Dictionary in res.get_property_list():
+		if prop[&"name"] != property or not _can_display_property(prop):
+			continue
+		if prop[&"usage"] & PROPERTY_USAGE_READ_ONLY != 0:
+			return { }
+		var column := DataTable.ColumnConfig.new(property, "", prop[&"type"])
+		column.property_hint = prop[&"hint"]
+		column.hint_string = prop[&"hint_string"]
+		if not _column_holds_subresources(column):
+			return { }
+		var value: Variant = res.get(property)
+		if column.type == TYPE_ARRAY:
+			if value is not Array or value.is_read_only():
+				return { }
+			parent[&"base_type"] = column.hint_string.get_slice(":", 1)
+		elif value == null:
+			parent[&"base_type"] = column.hint_string
+		else:
+			return { }
+		return parent
+	return { }
+
+
+func _add_subresource_from_picker(
+	res: Resource, expected_parent: Resource,
+) -> void:
+	if not res or not current_registry or not is_in_subresource_view():
+		return
+	var parent := _get_subresource_target()
+	if parent.is_empty() or parent[&"resource"] != expected_parent:
+		YardLogger.warn("The current parent resource is no longer available for adding a sub-resource.")
+		update_view()
+		return
+	var parent_res: Resource = parent[&"resource"]
+	var property: StringName = _subresource_stack.back().property
+	var old_value: Variant = parent_res.get(property)
+	var new_value: Variant = res
+	if old_value is Array:
+		var array: Array = old_value
+		var element_script: Script = array.get_typed_script()
+		var compatible := (
+			is_instance_of(res, element_script) if element_script
+			else res.is_class(array.get_typed_class_name())
+		)
+		if not compatible:
+			YardLogger.error("This resource doesn't match the parent property's element type.")
+			return
+		var appended := array.duplicate()
+		appended.append(res)
+		new_value = appended
+	else:
+		var declared_types := ClassUtils.get_property_declared_types(parent_res, property)
+		if not ClassUtils.is_assignable(res, declared_types):
+			YardLogger.error("This resource doesn't match the parent property's type.")
+			return
+
+	_commit_property_edit(
+		parent_res, parent[&"display_id"], parent[&"file_resource"],
+		property, old_value, new_value, true,
+	)
+	footer.clear_resource_picker()
 
 
 ## True if this column's property is a Resource, or an Array[Resource]-like typed array,
@@ -892,6 +965,18 @@ func _apply_property_edit(
 		)
 		return
 
+	_commit_property_edit(res, display_id, file_resource, property, old_value, new_value)
+
+
+func _commit_property_edit(
+	res: Resource,
+	display_id: String,
+	file_resource: Resource,
+	property: StringName,
+	old_value: Variant,
+	new_value: Variant,
+	refresh: bool = false,
+) -> void:
 	var undo_redo := EditorInterface.get_editor_undo_redo()
 	undo_redo.create_action("Set %s—>%s" % [display_id, property])
 	undo_redo.add_do_property(res, property, new_value)
@@ -901,6 +986,8 @@ func _apply_property_edit(
 		# files. The action also keeps file_resource loaded until it is saved.
 		undo_redo.add_do_method(EditorInterface, &"set_object_edited", file_resource, true)
 		undo_redo.add_undo_method(EditorInterface, &"set_object_edited", file_resource, true)
+	if refresh:
+		undo_redo.add_do_method(self, &"update_view")
 	undo_redo.add_undo_method(self, &"update_view")
 	undo_redo.commit_action()
 
@@ -1171,6 +1258,12 @@ func _on_breadcrumb_crumb_pressed(depth: int) -> void:
 
 func _on_footer_add_entry_requested(res: Resource, string_id: String, target_dir: String) -> void:
 	_add_entry_from_picker(res, string_id, target_dir)
+
+
+func _on_footer_add_subresource_requested(
+	res: Resource, parent_resource: Resource,
+) -> void:
+	_add_subresource_from_picker(res, parent_resource)
 
 
 ## One level of subresource table navigation: the property that was expanded,

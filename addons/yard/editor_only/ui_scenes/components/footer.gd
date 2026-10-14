@@ -7,6 +7,7 @@
 extends HBoxContainer
 
 signal add_entry_requested(res: Resource, string_id: String, target_dir: String)
+signal add_subresource_requested(res: Resource, parent_resource: Resource)
 signal registry_panel_toggled(toggled_on: bool)
 
 const Namespace := preload("res://addons/yard/editor_only/namespace.gd")
@@ -29,6 +30,9 @@ var _toggle_button_forward: bool = false
 var _texture_rect_parent: Button
 var _dir_dialog: EditorFileDialog
 var _res_picker: EditorResourcePicker
+var _adding_subresource: bool = false
+var _subresource_path: StringName
+var _subresource_parent: Dictionary = { }
 
 @onready var toggle_registry_panel_button: Button = %ToggleRegistryPanelButton
 @onready var add_entry_container: HBoxContainer = %AddEntryContainer
@@ -83,10 +87,13 @@ func set_current_registry(registry: Registry) -> void:
 		return
 	var new_uid := Compat.path_to_uid(registry.resource_path)
 	var is_another := new_uid != _current_registry_uid
-	if is_another and _current_registry_uid:
+	if is_another and _current_registry_uid and not _adding_subresource:
 		_cache_add_entry_value()
 	_current_registry_uid = new_uid
 	_current_registry_settings = RegistryIO.get_registry_settings(registry)
+	_adding_subresource = false
+	_subresource_path = &""
+	_subresource_parent = { }
 	_setup_add_entry()
 
 
@@ -97,6 +104,7 @@ func clear_add_entry_cache(uid: String) -> void:
 
 func clear_resource_picker() -> void:
 	_res_picker.edited_resource = null
+	_toggle_add_entry_button()
 
 
 func clear_string_id_line_edit() -> void:
@@ -107,9 +115,47 @@ func toggle_add_entry_fields(toggled_on: bool) -> void:
 	add_entry_container.visible = toggled_on
 
 
+func set_root_add_entry() -> void:
+	if _adding_subresource:
+		_adding_subresource = false
+		_subresource_path = &""
+		_subresource_parent = { }
+		_setup_add_entry()
+	add_entry_directory_container.show()
+	entry_name_line_edit.show()
+	add_entry_button.text = tr("Add Entry")
+	toggle_add_entry_fields(true)
+
+
+## The opened cell determines the parent, including when its array or Resource field is empty.
+func set_subresource_target(parent: Dictionary, path: StringName) -> void:
+	if not _adding_subresource:
+		_cache_add_entry_value()
+	if (
+		not _adding_subresource or _subresource_path != path
+		or parent.get(&"resource") != _subresource_parent.get(&"resource")
+		or parent.get(&"base_type") != _subresource_parent.get(&"base_type")
+	):
+		clear_resource_picker()
+	_adding_subresource = true
+	_subresource_path = path
+	_subresource_parent = parent
+	add_entry_directory_container.hide()
+	entry_name_line_edit.hide()
+	add_entry_button.text = tr("Add Sub-resource")
+	toggle_add_entry_fields(true)
+	_res_picker.base_type = parent.get(&"base_type", "Resource")
+	_res_picker.editable = not parent.is_empty()
+	_toggle_add_entry_button()
+
+
 func _toggle_add_entry_button() -> void:
+	var has_target := (
+		not _subresource_parent.is_empty()
+		if _adding_subresource else not entry_name_line_edit.text.is_empty()
+	)
 	add_entry_button.disabled = !(
-		_res_picker and _res_picker.edited_resource and entry_name_line_edit.text
+		_res_picker and _res_picker.edited_resource and has_target
 	)
 
 
@@ -270,6 +316,12 @@ func _on_new_entry_text_submitted(_new_text: String) -> void:
 func _on_add_entry_button_pressed() -> void:
 	_toggle_add_entry_button()
 	if add_entry_button.disabled:
+		return
+
+	if _adding_subresource:
+		add_subresource_requested.emit(
+			_res_picker.edited_resource, _subresource_parent[&"resource"],
+		)
 		return
 
 	add_entry_requested.emit(
