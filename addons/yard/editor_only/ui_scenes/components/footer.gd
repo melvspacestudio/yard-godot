@@ -20,6 +20,7 @@ const _AUTO_DIR_ID := -1
 const _BROWSE_DIR_ID := -2
 
 var _current_registry_uid: String
+var _current_registry: Registry
 var _current_registry_settings: RegistryIO.RegistrySettings
 var _add_entry_cache: Dictionary[String, Dictionary] = { }
 var _add_entry_target_dir: String = ""
@@ -75,6 +76,7 @@ func _process(_delta: float) -> void:
 
 
 func set_current_registry(registry: Registry) -> void:
+	_current_registry = registry
 	if not registry:
 		_current_registry_uid = ""
 		_current_registry_settings = null
@@ -155,7 +157,7 @@ func _rebuild_add_entry_directory_options() -> void:
 	add_entry_directory_button.add_item(tr("Auto (registry file location)"))
 	add_entry_directory_button.set_item_id(0, _AUTO_DIR_ID)
 
-	var scan_dirs := _current_registry_settings.get_all_scan_directories()
+	var scan_dirs := _get_add_entry_directories()
 	for dir in scan_dirs:
 		add_entry_directory_button.add_item(dir)
 	if _add_entry_custom_dir and _add_entry_custom_dir not in scan_dirs:
@@ -179,6 +181,47 @@ func _rebuild_add_entry_directory_options() -> void:
 			target_idx = i
 			break
 	add_entry_directory_button.select(target_idx)
+
+
+func _get_add_entry_directories() -> Array[String]:
+	var directories: Array[String] = []
+	for ruleset in _current_registry_settings.get_compiled_rulesets():
+		for scan_dir in ruleset.scan_directories:
+			if ruleset.scan_regex_include.is_empty():
+				if scan_dir not in directories:
+					directories.append(scan_dir)
+				continue
+
+			var include_regex := RegEx.new()
+			if include_regex.compile(ruleset.scan_regex_include) != OK:
+				continue
+			var exclude_regex := RegEx.new()
+			if not ruleset.scan_regex_exclude.is_empty():
+				if exclude_regex.compile(ruleset.scan_regex_exclude) != OK:
+					continue
+			var root := scan_dir.trim_suffix("/") + "/"
+			for uid in _current_registry.get_all_uids():
+				var path := Compat.uid_to_path(uid)
+				if not path.begins_with(root) or not ResourceLoader.exists(path):
+					continue
+				var relative_path := path.trim_prefix(root)
+				if not ruleset.recursive_scan and relative_path.contains("/"):
+					continue
+				if include_regex.search(relative_path) == null:
+					continue
+				if exclude_regex.is_valid() and exclude_regex.search(relative_path) != null:
+					continue
+				if (
+					not ruleset.allowed_file_extensions.is_empty()
+					and path.get_extension() not in ruleset.allowed_file_extensions
+				):
+					continue
+				var directory := path.get_base_dir()
+				if directory not in directories:
+					directories.append(directory)
+
+	directories.sort()
+	return directories
 
 
 func _cache_add_entry_value() -> void:
