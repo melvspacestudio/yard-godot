@@ -97,6 +97,7 @@ func _ready() -> void:
 	EditorInterface.get_inspector().property_edited.connect(_on_inspector_property_edited)
 
 	data_table.cell_selected.connect(_on_cell_selected)
+	data_table.cell_button_pressed.connect(_on_cell_button_pressed)
 	data_table.cell_right_selected.connect(_on_cell_right_selected)
 	data_table.header_right_clicked.connect(_on_header_right_clicked)
 	data_table.cell_edited.connect(_on_cell_edited)
@@ -480,6 +481,10 @@ func _build_columns(
 		if class_string:
 			column.class_string = class_string
 
+		if _column_holds_subresources(column):
+			column.cell_button_icon = get_theme_icon(&"Object", &"EditorIcons")
+			column.cell_button_tooltip = tr("Show Sub-resources")
+
 		columns.append(column)
 
 	return columns
@@ -530,11 +535,35 @@ func _can_display_property(property_info: Dictionary) -> bool:
 	)
 
 
-func _enter_subresource_view(property: StringName) -> void:
-	if property == &"":
+func _enter_subresource_view(property: StringName, parent_row_id: StringName = &"") -> void:
+	if not current_registry or property == &"":
+		return
+	if parent_row_id == &"":
+		parent_row_id = data_table.focused_row
+	var parent: Dictionary = { }
+	if is_in_subresource_view():
+		parent = _resolve_subresource_leaves().get(parent_row_id, { })
+		var displayed_parent: Dictionary = _subresource_rows.get(parent_row_id, { })
+		if parent.get(&"resource") != displayed_parent.get(&"resource"):
+			update_view()
+			return
+	else:
+		var uid := current_registry.get_uid(parent_row_id)
+		if RegistryIO.is_uid_valid(uid):
+			var res := current_registry.load_entry(uid)
+			parent = {
+				&"resource": res,
+				&"display_id": String(parent_row_id),
+				&"file_resource": res,
+			}
+	var parent_res: Resource = parent.get(&"resource")
+	if not parent_res or property not in parent_res:
 		return
 	var frame := SubresourceFrame.new()
 	frame.property = property
+	frame.parent_row_id = parent_row_id
+	frame.parent_resource = parent_res
+	frame.parent_display_id = parent[&"display_id"]
 	_subresource_stack.append(frame)
 	_reset_table_navigation()
 	update_view()
@@ -653,12 +682,12 @@ func _update_subresource_view() -> void:
 		data_table.grab_focus()
 
 
-## Walks the whole subresource stack from the root registry entries down to the deepest
-## level, expanding Array[Resource] properties into one row per element along the way.
+## Follows the selected parent at each navigation level, expanding only that parent's
+## Array[Resource] property into one row per element.
 ## Returns row_id -> {resource, display_id, file_resource}. A Resource property keeps its
 ## parent's row_id; an Array element appends ":n" to it. row_id is an opaque key, never parsed.
 ## file_resource is the file-backed resource that saves this row's resource, held to keep it loaded.
-func _resolve_subresource_leaves() -> Dictionary[StringName, Dictionary]:
+func _resolve_subresource_leaves(depth: int = -1) -> Dictionary[StringName, Dictionary]:
 	var current: Array[Dictionary] = []
 	for uid in current_registry.get_all_uids():
 		if not RegistryIO.is_uid_valid(uid):
@@ -674,10 +703,14 @@ func _resolve_subresource_leaves() -> Dictionary[StringName, Dictionary]:
 			}
 		)
 
-	for frame: SubresourceFrame in _subresource_stack:
+	var frame_count := _subresource_stack.size() if depth < 0 else depth
+	for frame_index in frame_count:
+		var frame: SubresourceFrame = _subresource_stack[frame_index]
 		var next: Array[Dictionary] = []
 		for item: Dictionary in current:
 			var parent_res: Resource = item[&"resource"]
+			if item[&"row_id"] != frame.parent_row_id or parent_res != frame.parent_resource:
+				continue
 			if not parent_res or frame.property not in parent_res:
 				continue
 			var parent_file_res: Resource = item[&"file_resource"]
@@ -772,7 +805,7 @@ func _update_subresource_breadcrumb() -> void:
 	for i in _subresource_stack.size():
 		var frame: SubresourceFrame = _subresource_stack[i]
 		var is_current := i == _subresource_stack.size() - 1
-		var label := String(frame.property).capitalize()
+		var label := "%s: %s" % [frame.parent_display_id, String(frame.property).capitalize()]
 		if is_current:
 			label += " (%d)" % _subresource_rows.size()
 		_add_breadcrumb_crumb(label, i + 1, is_current)
@@ -919,7 +952,10 @@ func _add_entry_from_picker(res: Resource, string_id: String, target_dir: String
 
 func _update_subresource_menu_item(menu: PopupMenu, col: StringName) -> void:
 	var column := data_table.get_column(col) if col != &"" else null
-	var can_open := column != null and _column_holds_subresources(column)
+	var can_open := (
+		data_table.is_cell_valid(data_table.focused_row, col)
+		and column != null and _column_holds_subresources(column)
+	)
 	var item_idx := menu.get_item_index(ColumnMenuAction.SUBRESOURCES_TABLE)
 	var already_present := item_idx != -1
 
@@ -992,6 +1028,10 @@ func _on_drag_begin() -> void:
 func _on_drag_end() -> void:
 	drag_and_drop_info_panel.hide()
 	focus_panel.hide()
+
+
+func _on_cell_button_pressed(row_id: StringName, col: StringName) -> void:
+	_enter_subresource_view(col, row_id)
 
 
 func _on_cell_selected(row_id: StringName, col: StringName) -> void:
@@ -1124,4 +1164,7 @@ func _on_footer_add_entry_requested(res: Resource, string_id: String, target_dir
 ## and the column set resolved for the resources currently shown at that level.
 class SubresourceFrame:
 	var property: StringName
+	var parent_row_id: StringName
+	var parent_resource: Resource
+	var parent_display_id: String
 	var columns_info: Array[Dictionary] = []

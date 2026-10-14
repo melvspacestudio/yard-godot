@@ -8,6 +8,7 @@
 extends Control
 
 signal cell_selected(row_id: StringName, col: StringName)
+signal cell_button_pressed(row_id: StringName, col: StringName)
 signal multiple_rows_selected(row_ids: Array[StringName])
 signal cell_right_selected(row_id: StringName, col: StringName, mouse_pos: Vector2)
 signal header_left_clicked(column: StringName)
@@ -142,6 +143,7 @@ var _pan_delta_accumulation: Vector2 = Vector2.ZERO
 
 # Rendering
 var _pixelated_canvas_rid: RID
+var _cell_buttons: Array[Button] = []
 
 
 func _ready() -> void:
@@ -195,6 +197,8 @@ func _gui_input(event: InputEvent) -> void:
 func _draw() -> void:
 	RenderingServer.canvas_item_clear(_pixelated_canvas_rid)
 	if not is_inside_tree() or _columns.is_empty():
+		for button in _cell_buttons:
+			button.hide()
 		return
 
 	var frozen_w := _get_frozen_width()
@@ -268,6 +272,8 @@ func _draw() -> void:
 
 		if _v_scroll.visible:
 			draw_rect(Rect2(vis_w, header_height, _v_scroll.size.x + 50, size.y), row_color)
+
+	_update_cell_buttons(frozen_w, vis_w)
 
 
 #region PUBLIC METHODS
@@ -587,6 +593,8 @@ func _refresh_style() -> void:
 func _reset_column_widths() -> void:
 	for column in _columns:
 		column.minimum_width = default_minimum_column_width
+		if column.cell_button_icon:
+			column.minimum_width = maxf(column.minimum_width, row_height * 2.0)
 		var header_size := font.get_string_size(
 			column.header,
 			HORIZONTAL_ALIGNMENT_LEFT,
@@ -731,7 +739,59 @@ func _dispatch_cell_draw(cell_rect: Rect2, row: StringName, col: StringName) -> 
 		draw_rect(cell_rect, invalid_cell_color, true)
 		return
 	var column := get_column(col)
+	if column.cell_button_icon:
+		cell_rect.size.x = maxf(0.0, cell_rect.size.x - row_height)
 	column.get_cell_type().draw_cell(self, cell_rect, get_cell_value(row, col), column, _style)
+
+
+## Reuse native buttons for visible cells only. Hide buttons whose cell edge is
+## clipped by frozen columns or scrollbars.
+func _update_cell_buttons(frozen_width: float, visible_width: float) -> void:
+	var button_count := 0
+	var visible_bottom := size.y - (_h_scroll.size.y if _h_scroll.visible else 0.0)
+	for col_idx in _columns.size():
+		var column := _columns[col_idx]
+		if not column.cell_button_icon:
+			continue
+		var cell_x := _get_col_x_pos(col_idx)
+		var button_x := cell_x + column.current_width - row_height
+		var clip_left := 0.0 if column.frozen else frozen_width
+		var clip_right := minf(frozen_width, visible_width) if column.frozen else visible_width
+		if button_x < clip_left or cell_x + column.current_width > clip_right:
+			continue
+		for row_idx in range(_visible_rows_range[0], _visible_rows_range[1]):
+			var row := _order[row_idx]
+			if not is_cell_valid(row, column.identifier):
+				continue
+			var cell_y := header_height + (row_idx - _visible_rows_range[0]) * row_height
+			if cell_y + row_height > visible_bottom:
+				continue
+			if button_count == _cell_buttons.size():
+				var new_button := Button.new()
+				new_button.focus_mode = Control.FOCUS_NONE
+				new_button.expand_icon = true
+				new_button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+				new_button.pressed.connect(_on_cell_button_pressed.bind(new_button))
+				add_child(new_button)
+				_cell_buttons.append(new_button)
+			var button := _cell_buttons[button_count]
+			if (
+				button.get_meta(&"row", &"") != row
+				or button.get_meta(&"column", &"") != column.identifier
+			):
+				button.hide() # Cancel a held press before reusing it for another cell.
+			if button.icon != column.cell_button_icon:
+				button.icon = column.cell_button_icon
+				button.add_theme_constant_override(&"icon_max_width", column.cell_button_icon.get_width())
+			button.tooltip_text = column.cell_button_tooltip
+			button.set_meta(&"row", row)
+			button.set_meta(&"column", column.identifier)
+			button.position = Vector2(button_x + 2.0, cell_y + 2.0)
+			button.size = Vector2(row_height - 4.0, row_height - 4.0)
+			button.show()
+			button_count += 1
+	for button_idx in range(button_count, _cell_buttons.size()):
+		_cell_buttons[button_idx].hide()
 
 
 func _draw_header_cell(col_idx: int, cell_x: float, vis_w: float) -> void:
@@ -1524,6 +1584,13 @@ func _dispatch_cell_input(event: InputEvent, row: StringName, col: StringName) -
 
 
 #region SIGNAL CALLBACKS
+
+func _on_cell_button_pressed(button: Button) -> void:
+	_finish_editing(false)
+	_click_count = 0
+	_double_click_timer.stop()
+	cell_button_pressed.emit(button.get_meta(&"row"), button.get_meta(&"column"))
+
 
 func _on_resized() -> void:
 	_update_scrollbars()

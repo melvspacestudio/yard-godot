@@ -58,6 +58,8 @@ var current_width: float:
 		current_width = max(value, minimum_width)
 var frozen: bool = false
 var read_only: bool = false
+var cell_button_icon: Texture2D
+var cell_button_tooltip: String
 
 var _cache: Dictionary = { }
 
